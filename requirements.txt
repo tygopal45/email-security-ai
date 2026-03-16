@@ -1,0 +1,38 @@
+# --- Web Framework & Data Validation ---
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+email-validator
+
+# --- LangChain Ecosystem ---
+langchain
+langchain-core
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+langchain-chroma
+
+# --- Vector Database ---
+chromadb
+
+# --- Natural Language Processing & HuggingFace ---
+torch
+transformers
+sentence-transformers
+sentencepiece
+protobuf
+accelerate
+
+# --- Document Parsing & Utilities ---
+beautifulsoup4
+lxml
+html5lib
+mail-parser
+requests
+numpy
+pandas
+scikit-learn
+matplotlib
+tqdm
+regex
