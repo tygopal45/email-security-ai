@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# ML / RAG runtime artifacts
+app/data/vector_store/
+/data/
+
+# OS / editor
+.DS_Store
+
+# Personal study / interview prep (not part of the project)
+Study Guide/

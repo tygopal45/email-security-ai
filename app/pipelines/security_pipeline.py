@@ -1,6 +1,18 @@
-# app/pipeline/security_pipeline.py
+"""
+Security pipeline — the orchestrator.
+
+This module ties the whole system together. It owns the (heavy) model instances
+and runs the four stages in order for each incoming email:
+
+    Model 1 (classify)  ->  Model 2 (risk)  ->  RAG (evidence)  ->  Model 3 (actions)
+
+The models are loaded once and cached in module-level globals, so we pay the
+expensive load cost a single time rather than on every request.
+"""
+import os
 import time
 
+from app.config.settings import settings
 from app.models.model1_classifier import Model1Classifier
 from app.models.model2_risk import Model2RiskEngine
 from app.models.model3_action import Model3ActionGenerator
@@ -14,37 +26,46 @@ from app.schemas.response_schema import (
 )
 
 # -------- LAZY MODEL LOADING --------
-
+# These start as None and get filled in on the first call to load_models().
 model1 = None
 model2 = None
 model3 = None
 rag_engine = None
 
+
 def load_models():
+    """Load the models once and reuse them forever.
+
+    Safe to call repeatedly: after the first successful load, `model1` is no
+    longer None so every later call is an instant no-op. We call this both at
+    startup (to warm up) and at the top of analyze() (as a safety net).
+    """
     global model1, model2, model3, rag_engine
     if model1 is None:
-        import os
-        os.makedirs("data/vector_store", exist_ok=True)
+        # Make sure the vector store directory exists before Chroma tries to use it.
+        os.makedirs(settings.vector_store_dir, exist_ok=True)
         model1 = Model1Classifier()
         model2 = Model2RiskEngine()
         model3 = Model3ActionGenerator()
         rag_engine = RAGEngine()
-        # Optionally ensure index is loaded
+        # Build the RAG index from the knowledge base files.
         if hasattr(rag_engine, "rebuild_index"):
             rag_engine.rebuild_index()
 
 
 def analyze(payload):
+    """Run one email through all four stages and return the assembled response."""
     load_models()
     start_total = time.perf_counter()
 
     # -------------------------------------------------------------
-    # 1. RUN MODEL 1 (SPAM / INTENT CLASSIFICATION)
+    # 1. Classify the email (what kind of message is this?)
     # -------------------------------------------------------------
     model1_result = model1.predict(payload)
 
     # -------------------------------------------------------------
-    # 2. RUN MODEL 2 (RISK ENGINE)
+    # 2. Score the risk (how dangerous is it, and why?)
+    #    Model 2 uses Model 1's output as one of its inputs.
     # -------------------------------------------------------------
     model2_result = model2.analyze(
         payload,
@@ -52,7 +73,8 @@ def analyze(payload):
     )
 
     # -------------------------------------------------------------
-    # 3. RAG RETRIEVAL (EVIDENCE GATHERING)
+    # 3. Retrieve supporting evidence from the knowledge base (RAG).
+    #    We search using the email's subject + body as the query.
     # -------------------------------------------------------------
     text_content = payload.content.text if payload.content and payload.content.text else ""
     subject = payload.subject if payload.subject else ""
@@ -60,7 +82,7 @@ def analyze(payload):
     rag_evidence = rag_engine.get_evidence(query) if getattr(rag_engine, "get_evidence", None) else []
 
     # -------------------------------------------------------------
-    # 4. RUN MODEL 3 (ACTION GENERATION) 
+    # 4. Generate recommended actions, grounded in the risk + evidence.
     # -------------------------------------------------------------
     model3_result = model3.generate(
         {"risk_level": model2_result.get("risk_level", "unknown"), "reasons": model2_result.get("reasons", [])},
@@ -69,21 +91,23 @@ def analyze(payload):
     recommended_actions = model3_result.get("actions", [])
 
     # -------------------------------------------------------------
-    # TOTAL LATENCY METRICS
+    # Record total processing time and which models we used.
+    # Model names are read from the live instances so this can never drift
+    # out of sync with what's actually loaded.
     # -------------------------------------------------------------
     total_time = int((time.perf_counter() - start_total) * 1000)
 
     metadata = Metadata(
         processing_time_ms=total_time,
         models={
-            "model1": "facebook/bart-large-mnli",
-            "model2": "microsoft/deberta-v3-base",
-            "model3": "google/flan-t5-base"
+            "model1": model1.model_name,
+            "model2": model2.model_name,
+            "model3": model3.model_name,
         }
     )
 
     # -------------------------------------------------------------
-    # BUILD RESPONSE
+    # Assemble the validated response object and return it.
     # -------------------------------------------------------------
     response = AnalyzeResponse(
         classification=Classification(

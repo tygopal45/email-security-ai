@@ -1,76 +1,98 @@
 # app/rag/rag_engine.py
-from pathlib import Path
-from typing import List, Optional
+"""
+RAG engine — Retrieval-Augmented Generation.
 
-from langchain_community.vectorstores import Chroma
+The idea: rather than hoping the action-generating model already "knows" good
+security advice, we keep that advice in a knowledge base of text files, and at
+request time we *retrieve* the most relevant snippets to feed into the prompt.
+
+How it works:
+  1. Load the knowledge-base documents.
+  2. Split them into small overlapping chunks.
+  3. Turn each chunk into a vector (embedding) and store it in Chroma.
+  4. At query time, embed the query and find the closest chunks by similarity.
+
+This class is written defensively so an empty or missing knowledge base never
+crashes the service — it just returns no evidence.
+"""
+from pathlib import Path
+from typing import List, Optional, Union
+
+from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
+from app.config.settings import settings
 from app.embeddings.embedding_model import EmbeddingModel
 from app.rag.knowledge_loader import load_knowledge_base
 
 
 class RAGEngine:
-    def __init__(self, persist_directory: str = "data/vector_store"):
-        """
-        Robust RAG engine:
-         - filters out empty docs
-         - avoids calling encode() with empty lists
-         - creates an empty persistent Chroma store if there is nothing to index
-        """
+    def __init__(self, persist_directory: Optional[Union[str, Path]] = None):
+        """Build (or open) the vector store from the knowledge base."""
         self.embedding = EmbeddingModel().get()
-        self.persist_directory = persist_directory
+        # Where Chroma persists its index on disk. Defaults to the configured
+        # vector-store directory but can be overridden (handy for tests).
+        self.persist_directory = str(
+            persist_directory if persist_directory is not None else settings.vector_store_dir
+        )
         self.vector_store: Optional[Chroma] = None
 
-        # load docs (list[Document])
+        # Load the knowledge-base files as Documents.
         docs: List[Document] = load_knowledge_base()
 
-        # filter out empty documents (safeguard)
+        # Drop any empty documents — embedding empty text is pointless and some
+        # backends error on it.
         docs = [d for d in docs if getattr(d, "page_content", "").strip()]
 
         if not docs:
-            # create an empty/persistent Chroma store (no indexing)
-            # this does not call embeddings.encode on an empty list
+            # Nothing to index yet: create an empty (but valid) persistent store
+            # so get_evidence() can run without blowing up.
             self.vector_store = Chroma(
                 persist_directory=self.persist_directory,
                 embedding_function=self.embedding
             )
             return
 
-        # split into chunks
+        # Split documents into ~500-char chunks with a little overlap, so search
+        # returns focused passages and we don't cut sentences off mid-thought.
         splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = splitter.split_documents(docs)
 
-        # filter chunks with non-empty content
+        # Same empty-content safeguard, now at the chunk level.
         chunks = [c for c in chunks if getattr(c, "page_content", "").strip()]
 
         if not chunks:
-            # fallback to empty store
             self.vector_store = Chroma(
                 persist_directory=self.persist_directory,
                 embedding_function=self.embedding
             )
             return
 
-        # Now safe to create vector store from non-empty chunks
+        # Embed every chunk and build the searchable vector store.
         self.vector_store = Chroma.from_documents(
             documents=chunks,
             embedding=self.embedding,
             persist_directory=self.persist_directory
         )
 
-    def get_evidence(self, text: str, k: int = 3) -> List[str]:
-        """
-        Return up to k evidence snippets. If vector_store is None, return [].
-        """
+    def get_evidence(self, text: str, k: Optional[int] = None) -> List[str]:
+        """Return up to `k` knowledge-base snippets most relevant to `text`."""
+        # Fall back to the configured default (3) when no k is passed.
+        if k is None:
+            k = settings.rag_top_k
+
+        # Empty query or no index -> nothing to return.
         if not text:
             return []
 
         if not self.vector_store:
             return []
 
-        results = self.vector_store.similarity_search(text, k=k)  # returns Documents
+        # similarity_search embeds the query and returns the closest chunks.
+        results = self.vector_store.similarity_search(text, k=k)
 
+        # Return the text of each hit, trimmed to keep the prompt compact.
         evidence = []
         for doc in results:
             snippet = getattr(doc, "page_content", "").strip()
@@ -78,15 +100,17 @@ class RAGEngine:
                 evidence.append(snippet[:400])
         return evidence
 
-    def rebuild_index(self, directory: str = "data/knowledge_base"):
+    def rebuild_index(self, directory: Optional[Union[str, Path]] = None):
+        """Re-read the knowledge base and rebuild the index from scratch.
+
+        Call this after the knowledge base files change so the new content is
+        searchable without restarting the app.
         """
-        Utility to rebuild the index from KB files (call when KB is updated).
-        """
-        docs = load_knowledge_base(directory)
+        docs = load_knowledge_base(directory if directory is not None else settings.knowledge_base_dir)
         docs = [d for d in docs if getattr(d, "page_content", "").strip()]
 
         if not docs:
-            # clear or create empty store
+            # No docs -> reset to an empty store.
             self.vector_store = Chroma(
                 persist_directory=self.persist_directory,
                 embedding_function=self.embedding
