@@ -89,16 +89,41 @@ class RAGEngine:
         if not self.vector_store:
             return []
 
-        # similarity_search embeds the query and returns the closest chunks.
-        results = self.vector_store.similarity_search(text, k=k)
+        # Fetch a few extra candidates so we can drop duplicates / noise and
+        # still return up to `k` useful snippets.
+        results = self.vector_store.similarity_search(text, k=k * 2)
 
-        # Return the text of each hit, trimmed to keep the prompt compact.
         evidence = []
+        seen = set()
         for doc in results:
             snippet = getattr(doc, "page_content", "").strip()
-            if snippet:
-                evidence.append(snippet[:400])
+            if not snippet:
+                continue
+
+            # Skip chunks that are just a markdown heading (e.g. "# Email Threat
+            # Types") — they add no real information.
+            if self._is_heading_only(snippet):
+                continue
+
+            snippet = snippet[:400]
+
+            # De-duplicate: the same chunk can surface more than once.
+            key = snippet.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            evidence.append(snippet)
+            if len(evidence) >= k:
+                break
+
         return evidence
+
+    @staticmethod
+    def _is_heading_only(snippet: str) -> bool:
+        """True if the snippet is a single markdown heading line with no body."""
+        lines = [ln for ln in snippet.splitlines() if ln.strip()]
+        return len(lines) == 1 and lines[0].lstrip().startswith("#")
 
     def rebuild_index(self, directory: Optional[Union[str, Path]] = None):
         """Re-read the knowledge base and rebuild the index from scratch.

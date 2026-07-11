@@ -63,9 +63,11 @@ class Model2RiskEngine:
         if self.analyzer is not None and text.strip():
             try:
                 result = self.analyzer(text, candidate_labels=self.candidate_reasons)
-                # Keep any factor the model is reasonably confident about (>0.4).
+                # Only keep a risk factor when the model is fairly confident.
+                # A lower threshold (e.g. 0.4) produced false positives such as
+                # flagging "requests sensitive information" on a plain email.
                 for label, score in zip(result['labels'], result['scores']):
-                    if score > 0.4:
+                    if score > 0.65:
                         reasons.append(label)
             except Exception as e:
                 print(f"Model 2 inference error: {e}")

@@ -87,13 +87,31 @@ class Model3ActionGenerator:
 
         return actions[:5]
 
-    def _fallback_actions(self) -> List[str]:
-        """Safe, sensible defaults used when the model produces nothing usable."""
+    def _fallback_actions(self, risk_level: str) -> List[str]:
+        """Curated advice that matches the verdict.
+
+        Used when the generator produces nothing usable (and always for "safe",
+        where alarming phishing advice would be wrong/confusing). Keeping the
+        advice risk-aware means a legitimate email is never told to "report as
+        phishing", and a dangerous one always gets protective steps.
+        """
+        if risk_level == "safe":
+            return [
+                "No action needed — this message appears legitimate.",
+                "Stay alert for unexpected links or attachments in future messages.",
+            ]
+        if risk_level == "suspicious":
+            return [
+                "Be cautious — do not click links or open attachments unless you trust the sender.",
+                "Verify the sender through an official channel if anything seems off.",
+                "If in doubt, report the message to your security team.",
+            ]
+        # risky / high / anything else -> protective steps
         return [
             "Do not click any links in the message.",
-            "Verify the sender through the official website.",
-            "Report the message as phishing.",
-            "Delete the suspicious message."
+            "Do not reply with any personal, financial, or login information.",
+            "Verify the sender through the official website, not links in the email.",
+            "Report the message as phishing and then delete it.",
         ]
 
     def generate(self, risk_analysis: Dict[str, Any], rag_evidence: List[str]) -> Dict[str, Any]:
@@ -102,22 +120,28 @@ class Model3ActionGenerator:
         risk_level = risk_analysis.get("risk_level", "unknown")
         reasons = risk_analysis.get("reasons", [])
 
-        # "None" is a deliberate literal string here — it reads fine inside the
-        # prompt sentence when there are no reasons/evidence to report.
-        reasons_text = ", ".join(reasons) if reasons else "None"
-        evidence_text = " ".join(rag_evidence) if rag_evidence else "None"
+        # A safe email needs no generated "what to do" — jump straight to the
+        # reassuring, risk-appropriate message and skip the (slow) generator.
+        if risk_level == "safe":
+            actions = self._fallback_actions(risk_level)
+        else:
+            # "None" is a deliberate literal string here — it reads fine inside
+            # the prompt sentence when there are no reasons/evidence to report.
+            reasons_text = ", ".join(reasons) if reasons else "None"
+            evidence_text = " ".join(rag_evidence) if rag_evidence else "None"
 
-        # Fill the template, run the model, and parse the result.
-        prompt_value = self.prompt.format(
-            risk_level=risk_level,
-            reasons_text=reasons_text,
-            evidence_text=evidence_text
-        )
-        actions = self._parse_output(self._run_generation(prompt_value))
+            # Fill the template, run the model, and parse the result.
+            prompt_value = self.prompt.format(
+                risk_level=risk_level,
+                reasons_text=reasons_text,
+                evidence_text=evidence_text
+            )
+            actions = self._parse_output(self._run_generation(prompt_value))
 
-        # Never return an empty, useless list — fall back to safe defaults.
-        if not actions:
-            actions = self._fallback_actions()
+            # Never return an empty, useless list — fall back to advice that
+            # matches this risk level.
+            if not actions:
+                actions = self._fallback_actions(risk_level)
 
         elapsed = int((time.perf_counter() - start) * 1000)
 
